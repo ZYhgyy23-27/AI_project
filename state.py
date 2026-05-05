@@ -1,7 +1,6 @@
 """运行时状态：相机帧、MQTT、YOLO 单例。"""
 
 import threading
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -11,10 +10,6 @@ import config
 
 latest_frame = None
 _frame_lock = threading.Lock()
-
-# 设备上行最新姿态 JSON 字符串（与 esp32/attitude 负载一致），供 WebSocket 新连接先发一帧
-_latest_attitude_json: Optional[str] = None
-_attitude_lock = threading.Lock()
 
 _mqtt_client = None
 _mqtt_lock = threading.Lock()
@@ -52,17 +47,6 @@ def get_yolo_model():
 def copy_latest_frame():
     with _frame_lock:
         return None if latest_frame is None else latest_frame.copy()
-
-
-def set_latest_attitude_json(text: str) -> None:
-    global _latest_attitude_json
-    with _attitude_lock:
-        _latest_attitude_json = text
-
-
-def get_latest_attitude_json() -> Optional[str]:
-    with _attitude_lock:
-        return _latest_attitude_json
 
 
 def handle_camera(payload: bytes) -> None:

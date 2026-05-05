@@ -16,11 +16,11 @@ import cv2
 import numpy as np
 import paho.mqtt.client as mqtt
 from flask import Flask, Response
-from flask_sock import Sock
 from langchain.agents import create_agent
 from langchain_community.chat_models.tongyi import ChatTongyi
 
 import agent_tool
+import attitude_viz
 import acoustic_module
 import asr_audio
 import config
@@ -55,103 +55,17 @@ _agent = None
 _agent_lock = threading.Lock()
 
 app = Flask(__name__)
-sock = Sock(app)
-
-_attitude_ws_clients: list = []
-_attitude_ws_lock = threading.Lock()
-
-_ATTITUDE_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>姿态（MQTT esp32/attitude）</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
-    #hud { padding: 12px 16px; background: #1a1a1a; border-bottom: 1px solid #333; }
-    #canvas-wrap { width: 100vw; height: calc(100vh - 56px); }
-    code { color: #8cf; }
-  </style>
-</head>
-<body>
-  <div id="hud">
-    <strong>实时姿态</strong>（本机 Mahony → MQTT <code>esp32/attitude</code> → WebSocket）
-    <span id="status" style="margin-left:12px;color:#888">连接中…</span>
-    <div id="quat" style="margin-top:6px;font-size:13px;color:#aaa"></div>
-  </div>
-  <div id="canvas-wrap"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script>
-    const statusEl = document.getElementById('status');
-    const quatEl = document.getElementById('quat');
-    const wrap = document.getElementById('canvas-wrap');
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111111);
-    const camera = new THREE.PerspectiveCamera(50, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
-    camera.position.set(2.2, 1.6, 3.2);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(wrap.clientWidth, wrap.clientHeight);
-    wrap.appendChild(renderer.domElement);
-    const light = new THREE.DirectionalLight(0xffffff, 0.9);
-    light.position.set(3, 5, 4);
-    scene.add(light);
-    scene.add(new THREE.AmbientLight(0x404040));
-    const box = new THREE.Mesh(
-      new THREE.BoxGeometry(2.2, 0.35, 1.0),
-      new THREE.MeshStandardMaterial({ color: 0x4488ff, metalness: 0.2, roughness: 0.5 })
-    );
-    scene.add(box);
-    const axes = new THREE.AxesHelper(1.5);
-    scene.add(axes);
-    const grid = new THREE.GridHelper(6, 12, 0x444444, 0x222222);
-    scene.add(grid);
-    const target = new THREE.Vector3(0, 0, 0);
-    camera.lookAt(target);
-    window.addEventListener('resize', () => {
-      camera.aspect = wrap.clientWidth / wrap.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(wrap.clientWidth, wrap.clientHeight);
-    });
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = proto + '//' + location.host + '/ws/attitude';
-    const ws = new WebSocket(wsUrl);
-    ws.onopen = () => { statusEl.textContent = 'WebSocket 已连接'; statusEl.style.color = '#6c6'; };
-    ws.onclose = () => { statusEl.textContent = 'WebSocket 已断开'; statusEl.style.color = '#c66'; };
-    ws.onerror = () => { statusEl.textContent = 'WebSocket 错误'; statusEl.style.color = '#c66'; };
-    ws.onmessage = (ev) => {
-      try {
-        const d = JSON.parse(ev.data);
-        if (typeof d.w === 'number' && typeof d.x === 'number') {
-          box.quaternion.set(d.x, d.y, d.z, d.w);
-          quatEl.textContent = 'seq=' + (d.seq != null ? d.seq : '-') +
-            '  t_us=' + (d.t_us != null ? d.t_us : '-') +
-            '  w=' + d.w.toFixed(4) + ' x=' + d.x.toFixed(4) + ' y=' + d.y.toFixed(4) + ' z=' + d.z.toFixed(4);
-        }
-      } catch (e) {}
-    };
-    function tick() {
-      requestAnimationFrame(tick);
-      renderer.render(scene, camera);
-    }
-    tick();
-  </script>
-</body>
-</html>"""
+attitude_viz.register(app)
 
 
-def _attitude_ws_broadcast(text: str) -> None:
-    with _attitude_ws_lock:
-        dead = []
-        for w in _attitude_ws_clients:
-            try:
-                w.send(text)
-            except Exception:
-                dead.append(w)
-        for w in dead:
-            try:
-                _attitude_ws_clients.remove(w)
-            except ValueError:
-                pass
+def _mqtt_topic_str(msg) -> str:
+    """paho-mqtt 2.x 下 topic 可能为 bytes，与 config 里 str 比较会永远不相等。"""
+    t = getattr(msg, "topic", None)
+    if t is None:
+        return ""
+    if isinstance(t, bytes):
+        return t.decode("utf-8")
+    return str(t)
 
 
 def pcm_int16_rms_db(pcm: bytes) -> float:
@@ -625,7 +539,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     print("MQTT 连接成功")
     client.subscribe(config.MQTT_TOPIC_CAM)
     client.subscribe(config.MQTT_TOPIC_VOICE)
-    client.subscribe(config.MQTT_TOPIC_ATTITUDE)
+    client.subscribe(attitude_viz.mqtt_subscribe_topic())
 
     def _deferred_sync_state() -> None:
         time.sleep(0.05)
@@ -645,23 +559,18 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    if msg.topic == config.MQTT_TOPIC_CAM:
+    topic = _mqtt_topic_str(msg)
+    if topic == config.MQTT_TOPIC_CAM:
         state.handle_camera(msg.payload)
-    elif msg.topic == config.MQTT_TOPIC_VOICE:
+    elif topic == config.MQTT_TOPIC_VOICE:
         try:
             voice_queue.put_nowait(msg.payload)
         except queue.Full:
             print("语音队列已满，丢弃一包 PCM")
-    elif msg.topic == config.MQTT_TOPIC_ATTITUDE:
-        try:
-            text = msg.payload.decode("utf-8")
-        except Exception:
-            text = ""
-        if text:
-            state.set_latest_attitude_json(text)
-            _attitude_ws_broadcast(text)
+    elif topic == attitude_viz.mqtt_subscribe_topic():
+        attitude_viz.handle_mqtt_payload(msg.payload)
     else:
-        print("未知 topic:", msg.topic)
+        print("未知 topic:", topic)
 
 
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
@@ -692,35 +601,6 @@ def index():
 </body>
 </html>
 """
-
-
-@app.route("/attitude")
-def attitude_page():
-    return Response(_ATTITUDE_DASHBOARD_HTML, mimetype="text/html; charset=utf-8")
-
-
-@sock.route("/ws/attitude")
-def ws_attitude(ws):
-    last = state.get_latest_attitude_json()
-    if last:
-        try:
-            ws.send(last)
-        except Exception:
-            pass
-    with _attitude_ws_lock:
-        _attitude_ws_clients.append(ws)
-    try:
-        while True:
-            try:
-                ws.receive(timeout=120.0)
-            except TimeoutError:
-                continue
-    finally:
-        with _attitude_ws_lock:
-            try:
-                _attitude_ws_clients.remove(ws)
-            except ValueError:
-                pass
 
 
 @app.route("/video")
