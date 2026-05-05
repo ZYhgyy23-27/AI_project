@@ -1,0 +1,18 @@
+# 语音 Agent（可选能力按环境变量启用）
+# 本地 ASR
+funasr>=1.0.0
+# 阿里云 DashScope：Paraformer 语音识别 + Qwen-Omni 多模态（需 DASHSCOPE_API_KEY）
+dashscope>=1.20.0
+openai>=1.52.0
+
+numpy
+opencv-python
+paho-mqtt
+flask
+flask-sock
+webrtcvad
+langchain
+langchain-community
+ultralytics
+edge-tts
+requests
