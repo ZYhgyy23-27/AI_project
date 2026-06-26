@@ -17,6 +17,12 @@ _mqtt_lock = threading.Lock()
 _model = None
 _model_lock = threading.Lock()
 
+_traffic_model = None
+_traffic_model_lock = threading.Lock()
+
+_blind_path_model = None
+_blind_path_model_lock = threading.Lock()
+
 
 def get_mqtt_client():
     with _mqtt_lock:
@@ -42,6 +48,22 @@ def get_yolo_model():
         if _model is None:
             _model = YOLO(config.MODEL_PATH)
         return _model
+
+
+def get_yolo_traffic_model():
+    global _traffic_model
+    with _traffic_model_lock:
+        if _traffic_model is None:
+            _traffic_model = YOLO(config.TRAFFIC_MODEL_PATH)
+        return _traffic_model
+
+
+def get_blind_path_model():
+    global _blind_path_model
+    with _blind_path_model_lock:
+        if _blind_path_model is None:
+            _blind_path_model = YOLO(config.BLIND_PATH_MODEL_PATH)
+        return _blind_path_model
 
 
 def copy_latest_frame():

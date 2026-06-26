@@ -16,3 +16,4 @@ langchain-community
 ultralytics
 edge-tts
 requests
+beautifulsoup4

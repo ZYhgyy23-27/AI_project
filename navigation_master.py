@@ -6,15 +6,18 @@ from enum import Enum
 from typing import Callable
 
 import config
+import crosswalk_guide
+import blind_guide
 import state
 
 
 class SessionState(str, Enum):
-    """语音会话状态机：空闲 → 闲聊 / 导航；可经关键词退回空闲。"""
+    """语音会话状态机：空闲 → 闲聊 / 导航 / 过马路辅助；可经关键词退回空闲。"""
 
     IDLE = "idle"
     CHAT = "chat"
     NAVIGATION = "navigation"
+    CROSSWALK = "crosswalk"
 
 
 session_state: SessionState = SessionState.IDLE
@@ -42,6 +45,29 @@ _NAV_OFF_KEYWORDS = (
     "退出导盲",
     "结束导盲",
     "停止导盲",
+)
+
+_CROSSWALK_ON_KEYWORDS = (
+    "过马路模式",
+    "开启过马路",
+    "开始过马路",
+    "打开过马路",
+    "进入过马路",
+    "启动过马路",
+    "过马路辅助",
+    "斑马线辅助",
+    "人行横道辅助",
+    "辅助过马路",
+    "帮我过马路",
+)
+_CROSSWALK_OFF_KEYWORDS = (
+    "退出过马路",
+    "关闭过马路",
+    "结束过马路",
+    "停止过马路",
+    "关闭斑马线",
+    "退出斑马线",
+    "结束斑马线",
 )
 
 _CHAT_INTENT_KEYWORDS = (
@@ -152,6 +178,14 @@ def _asr_requests_navigation_on(text: str) -> bool:
     return any(k in text for k in _NAV_ON_KEYWORDS)
 
 
+def _asr_requests_crosswalk_on(text: str) -> bool:
+    return any(k in text for k in _CROSSWALK_ON_KEYWORDS)
+
+
+def _asr_requests_crosswalk_off(text: str) -> bool:
+    return any(k in text for k in _CROSSWALK_OFF_KEYWORDS)
+
+
 def _asr_chat_intent(text: str) -> bool:
     return any(k in text for k in _CHAT_INTENT_KEYWORDS)
 
@@ -234,6 +268,24 @@ def _build_navigation_continue_prompt(user_asr_text: str) -> str:
     )
 
 
+def _build_crosswalk_mode_prompt(user_asr_text: str) -> str:
+    return (
+        f"用户刚才说：{user_asr_text}\n\n"
+        "【过马路辅助模式已开启】请先调用工具 yolo_detect_current_frame，"
+        "结合画面简洁说明：是否可见斑马线、红绿灯颜色（若可辨）、行人车辆风险。"
+        "不要编造画面中不存在的物体。"
+    )
+
+
+def _build_crosswalk_continue_prompt(user_asr_text: str) -> str:
+    return (
+        f"用户说：{user_asr_text}\n\n"
+        "【当前处于过马路辅助模式】请先调用工具 yolo_detect_current_frame，"
+        "用简洁中文描述斑马线与红绿灯及通行安全提示。"
+        "不要编造画面中不存在的物体。"
+    )
+
+
 def dispatch_asr_text(
     text: str,
     invoke_agent: Callable[[str], str],
@@ -244,9 +296,19 @@ def dispatch_asr_text(
     """
     global session_state
 
+    if _asr_requests_crosswalk_off(text):
+        if session_state == SessionState.CROSSWALK:
+            session_state = SessionState.IDLE
+            crosswalk_guide.reset_state()
+            state.publish(config.MQTT_TOPIC_CROSSWALK, "0")
+            publish_session_state()
+            return "好的，已退出过马路辅助模式。"
+        return "当前未在过马路辅助模式。需要的话可以说开启过马路辅助。"
+
     if _asr_requests_navigation_off(text):
         if session_state == SessionState.NAVIGATION:
             session_state = SessionState.IDLE
+            blind_guide.reset_state()
             state.publish(config.MQTT_TOPIC_NAV, "0")
             publish_session_state()
             return "好的，已退出导盲模式。有需要再叫我。"
@@ -259,18 +321,39 @@ def dispatch_asr_text(
             return "好的，已退出闲聊模式。"
         if session_state == SessionState.NAVIGATION:
             return "当前是导盲模式，未在闲聊。要结束导盲请说退出导航。"
+        if session_state == SessionState.CROSSWALK:
+            return "当前是过马路辅助模式，未在闲聊。请先说一句：退出过马路。"
         return "当前不在闲聊模式。"
 
     if _asr_requests_navigation_on(text):
+        if session_state == SessionState.CROSSWALK:
+            crosswalk_guide.reset_state()
+            state.publish(config.MQTT_TOPIC_CROSSWALK, "0")
         entering_nav = session_state != SessionState.NAVIGATION
         session_state = SessionState.NAVIGATION
         if entering_nav:
+            blind_guide.reset_state()
             state.publish(config.MQTT_TOPIC_NAV, "1")
             publish_session_state()
             return invoke_agent(_build_navigation_mode_prompt(text))
+        publish_session_state()
         return invoke_agent(_build_navigation_continue_prompt(text))
 
-    if session_state != SessionState.NAVIGATION and _asr_chat_intent(text):
+    if _asr_requests_crosswalk_on(text):
+        if session_state == SessionState.NAVIGATION:
+            blind_guide.reset_state()
+            state.publish(config.MQTT_TOPIC_NAV, "0")
+        entering_cw = session_state != SessionState.CROSSWALK
+        session_state = SessionState.CROSSWALK
+        crosswalk_guide.reset_state()
+        if entering_cw:
+            state.publish(config.MQTT_TOPIC_CROSSWALK, "1")
+        publish_session_state()
+        if entering_cw:
+            return invoke_agent(_build_crosswalk_mode_prompt(text))
+        return invoke_agent(_build_crosswalk_continue_prompt(text))
+
+    if session_state not in (SessionState.NAVIGATION, SessionState.CROSSWALK) and _asr_chat_intent(text):
         was_chat = session_state == SessionState.CHAT
         session_state = SessionState.CHAT
         publish_session_state()
@@ -283,6 +366,9 @@ def dispatch_asr_text(
     if session_state == SessionState.NAVIGATION:
         return invoke_agent(_build_navigation_continue_prompt(text))
 
+    if session_state == SessionState.CROSSWALK:
+        return invoke_agent(_build_crosswalk_continue_prompt(text))
+
     if session_state == SessionState.CHAT:
         if _is_quick_ack(text):
             return "不客气，还需要帮忙可以说。"
@@ -291,6 +377,6 @@ def dispatch_asr_text(
         return invoke_agent(_build_chat_continue_prompt(text))
 
     if _is_quick_ack(text):
-        return "嗯，我在。可以说开启导盲、问时间，或问天气。"
+        return "嗯，我在。可以说开启导盲、过马路辅助、问时间，或问天气。"
 
     return invoke_agent(text)

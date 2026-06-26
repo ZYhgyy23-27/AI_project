@@ -11,13 +11,62 @@ MQTT_TOPIC_RESULT = "esp32/result"
 MQTT_TOPIC_ASR_TEXT = "esp32/asr_text"
 MQTT_TOPIC_AGENT_REPLY = "agent/reply"
 MQTT_TOPIC_NAV = "esp32/navigation"
+# 导盲模式实时状态 JSON：path_visible / path_offset / turn_dx / obstacle / cue
+MQTT_TOPIC_NAVIGATION_STATUS = "esp32/navigation_status"
+# 过马路模式开关（与 session=crosswalk 同步，便于 ESP 订阅）
+MQTT_TOPIC_CROSSWALK = "esp32/crosswalk"
+# 实时状态 JSON：zebra_visible / light / align_nx / orient_deg
+MQTT_TOPIC_CROSSWALK_STATUS = "esp32/crosswalk_status"
 MQTT_TOPIC_SESSION = "esp32/session"
 MQTT_TOPIC_TTS_AUDIO = "esp32/tts_audio"
 MQTT_TOPIC_TTS_META = "esp32/tts_meta"
 # ESP32 本机 Mahony 姿态（JSON：t_us, seq, w, x, y, z）
 MQTT_TOPIC_ATTITUDE = "esp32/attitude"
 
-MODEL_PATH = "/root/best_all.pt"
+# 微信小程序「业务域名」校验文件：从公众平台下载后放到服务器，填绝对路径。
+# 服务启动后会在站点根路径提供同名 URL（如 /MP_verify_xxxx.txt），勿与 Nginx 其它 location 冲突。
+WECHAT_MP_VERIFY_FILE_PATH = os.environ.get("WECHAT_MP_VERIFY_FILE_PATH") or None
+
+MODEL_PATH = "/root/model/yolo-seg.pt"
+# 导盲盲道分割模型
+BLIND_PATH_MODEL_PATH = os.environ.get("BLIND_PATH_MODEL_PATH", "/root/model/yolo-seg.pt")
+# 红绿灯检测（可与斑马线分属不同权重）
+TRAFFIC_MODEL_PATH = os.environ.get("TRAFFIC_MODEL_PATH", "/root/model/trafficlight.pt")
+
+# ---------- 导盲辅助（盲道分割 + 避障 + 转弯 + 光流稳定）----------
+NAVIGATION_LOOP_ENABLED = os.environ.get("NAVIGATION_LOOP_ENABLED", "1") not in ("0", "false", "False")
+NAVIGATION_LOOP_INTERVAL_SEC = float(os.environ.get("NAVIGATION_LOOP_INTERVAL_SEC", "0.18"))
+NAVIGATION_AUDIO_DIR = os.environ.get("NAVIGATION_AUDIO_DIR") or os.environ.get("CROSSWALK_AUDIO_DIR", "/root/music")
+NAVIGATION_BLIND_PATH_CONF = float(os.environ.get("NAVIGATION_BLIND_PATH_CONF", "0.25"))
+NAVIGATION_BLIND_PATH_CLASS_IDS = os.environ.get("NAVIGATION_BLIND_PATH_CLASS_IDS") or None
+NAVIGATION_BLIND_PATH_NAME_SUBSTRINGS = os.environ.get(
+    "NAVIGATION_BLIND_PATH_NAME_SUBSTRINGS",
+    "盲道,blind,tactile,paving,guide,path",
+)
+NAVIGATION_OBSTACLE_NAME_SUBSTRINGS = os.environ.get(
+    "NAVIGATION_OBSTACLE_NAME_SUBSTRINGS",
+    "person,人,bicycle,bike,自行车,motor,电动车,car,汽车,bus,truck,chair,bench,箱,box,cone,柱,pole,路障,obstacle",
+)
+
+# ---------- 过马路辅助（斑马线 + 红绿灯 + 对齐语音）----------
+CROSSWALK_LOOP_ENABLED = os.environ.get("CROSSWALK_LOOP_ENABLED", "1") not in ("0", "false", "False")
+CROSSWALK_LOOP_INTERVAL_SEC = float(os.environ.get("CROSSWALK_LOOP_INTERVAL_SEC", "0.15"))
+CROSSWALK_AUDIO_DIR = os.environ.get("CROSSWALK_AUDIO_DIR", "/root/music")
+# 1=斑马线与灯均用 trafficlight.pt 一次推理（该模型需含斑马类别）；0=斑马用 MODEL_PATH，灯用 TRAFFIC_MODEL_PATH
+CROSSWALK_ZEBRA_USE_TRAFFIC_MODEL = os.environ.get("CROSSWALK_ZEBRA_USE_TRAFFIC_MODEL", "0") in (
+    "1",
+    "true",
+    "True",
+)
+# 逗号分隔类别 id；留空则按名称子串匹配（斑马用下串，灯用红/黄/绿默认子串）
+CROSSWALK_ZEBRA_CLASS_IDS = os.environ.get("CROSSWALK_ZEBRA_CLASS_IDS") or None
+CROSSWALK_ZEBRA_NAME_SUBSTRINGS = os.environ.get(
+    "CROSSWALK_ZEBRA_NAME_SUBSTRINGS",
+    "斑马,crosswalk,zebra,人行,横道",
+)
+CROSSWALK_RED_CLASS_IDS = os.environ.get("CROSSWALK_RED_CLASS_IDS") or None
+CROSSWALK_YELLOW_CLASS_IDS = os.environ.get("CROSSWALK_YELLOW_CLASS_IDS") or None
+CROSSWALK_GREEN_CLASS_IDS = os.environ.get("CROSSWALK_GREEN_CLASS_IDS") or None
 
 # ASR：默认同 FunASR Hub；可改为更大模型换准确率（更慢），如：
 # iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
@@ -148,3 +197,4 @@ OMNI_STREAM_MODEL_AUDIO_TO_ESP = os.environ.get("OMNI_STREAM_MODEL_AUDIO_TO_ESP"
     "true",
     "True",
 )
+DASHSCOPE_API_KEY = "sk-a8eb43d30bd54f17afa8f1bedf69dc19"

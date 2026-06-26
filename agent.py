@@ -23,7 +23,9 @@ import agent_tool
 import attitude_viz
 import acoustic_module
 import asr_audio
+import blind_guide
 import config
+import crosswalk_guide
 import dashscope_asr
 import intent_router
 import navigation_master
@@ -166,10 +168,11 @@ def get_agent():
                 tools=agent_tool.AGENT_TOOLS,
                 system_prompt=(
                     "你是一个智能助盲眼镜语音助手。用户输入来自ASR。"
-                    "系统有三种会话状态：空闲（默认）、闲聊（天气/时间）、导航/导盲（视觉避障）。"
-                    "导航须调用 yolo_detect_current_frame；闲聊中时间用 get_server_time，天气用 get_weather。"
-                    "在导航模式下用户每句话通常都要再次调用 YOLO。"
-                    "用户说退出导盲/导航或退出闲聊时由系统处理状态切换，你无需再调用工具。"
+                    "系统有四种会话状态：空闲（默认）、闲聊（天气/时间）、导航/导盲（视觉避障）、过马路辅助（斑马线与红绿灯）。"
+                    "导航与过马路辅助须调用 yolo_detect_current_frame；闲聊中时间用 get_server_time，天气用 get_weather。"
+                    "search_duckduckgo、search_wikipedia、load_webpage 仅在闲聊模式下可用；空闲/导航/过马路时不要调用这三项。"
+                    "在导航或过马路模式下用户每句话通常都要再次调用 YOLO。"
+                    "用户说退出导盲、退出过马路或退出闲聊时由系统处理状态切换，你无需再调用工具。"
                     "用户询问视觉场景时也应调用 YOLO。"
                     "请给出简洁中文回复。"
                 ),
@@ -429,6 +432,104 @@ def publish_tts_for_esp(text: str) -> None:
     _mqtt_publish_tts_meta_and_audio(meta, audio)
 
 
+def try_play_crosswalk_cue(cue_id: str) -> None:
+    """过马路预置 WAV：CROSSWALK_AUDIO_DIR/<cue_id>.wav；缺失则跳过。"""
+    if not config.CROSSWALK_LOOP_ENABLED:
+        return
+    d = (config.CROSSWALK_AUDIO_DIR or "").strip()
+    if not d:
+        return
+    path = os.path.join(d, f"{cue_id}.wav")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "rb") as f:
+            wav = f.read()
+    except OSError:
+        return
+    if not wav:
+        return
+    publish_raw_wav_bytes_for_esp(wav, summary_text=f"过马路：{cue_id}")
+
+
+def try_play_navigation_cue(cue_id: str) -> None:
+    """导盲预置 WAV：NAVIGATION_AUDIO_DIR/<cue_id>.wav；缺失则跳过。"""
+    if not config.NAVIGATION_LOOP_ENABLED:
+        return
+    d = (config.NAVIGATION_AUDIO_DIR or "").strip()
+    if not d:
+        return
+    path = os.path.join(d, f"{cue_id}.wav")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "rb") as f:
+            wav = f.read()
+    except OSError:
+        return
+    if not wav:
+        return
+    publish_raw_wav_bytes_for_esp(wav, summary_text=f"导盲：{cue_id}")
+
+
+def crosswalk_loop_worker() -> None:
+    """过马路辅助模式：双模型推理 + 对齐/灯态预录音频 + MQTT crosswalk_status。"""
+    cfg = crosswalk_guide.CrosswalkConfig()
+    while True:
+        try:
+            interval = float(config.CROSSWALK_LOOP_INTERVAL_SEC)
+        except Exception:
+            interval = 0.15
+        time.sleep(max(0.05, interval))
+        if not config.CROSSWALK_LOOP_ENABLED:
+            continue
+        if navigation_master.session_state != navigation_master.SessionState.CROSSWALK:
+            continue
+        fr = state.copy_latest_frame()
+        if fr is None:
+            continue
+        try:
+            seg = state.get_yolo_model()
+            traffic = state.get_yolo_traffic_model()
+        except Exception as e:
+            print("过马路：YOLO 未就绪:", e)
+            time.sleep(1.0)
+            continue
+        try:
+            crosswalk_guide.tick_crosswalk_frame(fr, seg, traffic, cfg, try_play_crosswalk_cue)
+        except Exception as e:
+            print("过马路处理异常:", e)
+
+
+def navigation_loop_worker() -> None:
+    """导盲模式：盲道分割 + 光流稳定 + 避障/转弯预录音频 + MQTT navigation_status。"""
+    cfg = blind_guide.BlindGuideConfig(path_conf=config.NAVIGATION_BLIND_PATH_CONF)
+    while True:
+        try:
+            interval = float(config.NAVIGATION_LOOP_INTERVAL_SEC)
+        except Exception:
+            interval = 0.18
+        time.sleep(max(0.05, interval))
+        if not config.NAVIGATION_LOOP_ENABLED:
+            continue
+        if navigation_master.session_state != navigation_master.SessionState.NAVIGATION:
+            continue
+        fr = state.copy_latest_frame()
+        if fr is None:
+            continue
+        try:
+            path_model = state.get_blind_path_model()
+            obstacle_model = state.get_yolo_model()
+        except Exception as e:
+            print("导盲：YOLO 未就绪:", e)
+            time.sleep(1.0)
+            continue
+        try:
+            blind_guide.tick_blind_frame(fr, path_model, obstacle_model, cfg, try_play_navigation_cue)
+        except Exception as e:
+            print("导盲处理异常:", e)
+
+
 def process_sentence(pcm_utterance: bytes) -> None:
     if len(pcm_utterance) < config.MIN_UTTERANCE_BYTES:
         return
@@ -503,9 +604,11 @@ def process_sentence(pcm_utterance: bytes) -> None:
         want_tts = curr_state in (
             navigation_master.SessionState.CHAT,
             navigation_master.SessionState.NAVIGATION,
+            navigation_master.SessionState.CROSSWALK,
         ) or prev_state in (
             navigation_master.SessionState.CHAT,
             navigation_master.SessionState.NAVIGATION,
+            navigation_master.SessionState.CROSSWALK,
         )
         if want_tts:
             omni_wav = omni_client.pop_pending_model_wav()
@@ -551,6 +654,13 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
                 == navigation_master.SessionState.NAVIGATION
                 else "0",
             )
+            state.publish(
+                config.MQTT_TOPIC_CROSSWALK,
+                "1"
+                if navigation_master.session_state
+                == navigation_master.SessionState.CROSSWALK
+                else "0",
+            )
             navigation_master.publish_session_state()
         except Exception as e:
             print("同步会话状态失败:", e)
@@ -585,6 +695,8 @@ def mqtt_thread():
     client.reconnect_delay_set(min_delay=1, max_delay=120)
     state.set_mqtt_client(client)
     threading.Thread(target=voice_worker, daemon=True, name="voice-worker").start()
+    threading.Thread(target=navigation_loop_worker, daemon=True, name="navigation-loop").start()
+    threading.Thread(target=crosswalk_loop_worker, daemon=True, name="crosswalk-loop").start()
     client.connect(config.MQTT_BROKER, config.MQTT_PORT, 60)
     client.loop_forever()
 

@@ -13,7 +13,7 @@ import navigation_master
 
 
 def _is_visual_or_nav_followup(text: str) -> bool:
-    """与避障、路况、朝向相关的短句，导盲模式下放行。"""
+    """与避障、路况、朝向相关的短句，导盲/过马路模式下放行。"""
     keys = (
         "前面",
         "眼前",
@@ -24,6 +24,15 @@ def _is_visual_or_nav_followup(text: str) -> bool:
         "楼梯",
         "盲道",
         "红绿灯",
+        "斑马",
+        "人行",
+        "横道",
+        "马路",
+        "绿灯",
+        "红灯",
+        "黄灯",
+        "通行",
+        "等待",
         "怎么走",
         "避让",
         "路况",
@@ -59,12 +68,28 @@ def _maybe_block_irrelevant_in_navigation(text: str) -> Optional[str]:
     return None
 
 
+def _maybe_block_irrelevant_in_crosswalk(text: str) -> Optional[str]:
+    """过马路辅助态下拦截闲聊（与路况无关时）。"""
+    if navigation_master.session_state != navigation_master.SessionState.CROSSWALK:
+        return None
+    if navigation_master._asr_requests_crosswalk_off(text):
+        return None
+    if navigation_master._asr_requests_navigation_on(text):
+        return None
+    if navigation_master._asr_chat_intent(text) and not _is_visual_or_nav_followup(text):
+        return "当前是过马路辅助模式。想聊别的内容，请先说一句：退出过马路。"
+    return None
+
+
 def dispatch_asr_text(text: str, invoke_agent: Callable[[str], str]) -> str:
     """
     先做上下文过滤与指令类型标注，再交给 navigation_master.dispatch_asr_text。
     invoke_agent 通常为 Tongyi Agent 或 Qwen-Omni 统一入口。
     """
     blocked = _maybe_block_irrelevant_in_navigation(text)
+    if blocked is not None:
+        return blocked
+    blocked = _maybe_block_irrelevant_in_crosswalk(text)
     if blocked is not None:
         return blocked
 

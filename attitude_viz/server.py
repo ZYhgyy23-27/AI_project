@@ -3,6 +3,10 @@
 
 解算在 ESP32 本机完成，此处仅订阅、缓存最后一帧、推送给浏览器。
 
+同源提供 /attitude/vendor/three.min.js（便于微信小程序 web-view 仅白名单单一域名）。
+
+可选：环境变量 WECHAT_MP_VERIFY_FILE_PATH 指向 MP_verify_*.txt，在站点根路径提供该校验文件。
+
 注意：MQTT on_message 跑在 paho 网络线程里，不可在该线程直接 ws.send（易无声失败）。
 通过每连接 queue，仅在 WebSocket 处理线程里 send。
 """
@@ -14,12 +18,13 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, Response
+from flask import Flask, Response, send_from_directory
 from flask_sock import Sock
 
 import config
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
+_VENDOR_DIR = _PACKAGE_DIR / "static" / "vendor"
 _dashboard_html: Optional[str] = None
 
 _latest_json: Optional[str] = None
@@ -68,9 +73,39 @@ def handle_mqtt_payload(payload: bytes) -> None:
     _fanout_to_websocket_threads(text)
 
 
+def _register_wechat_mp_verify(app: Flask) -> None:
+    """微信公众平台业务域名校验：根路径返回 MP_verify_*.txt 纯文本。"""
+    raw = getattr(config, "WECHAT_MP_VERIFY_FILE_PATH", None)
+    if not raw:
+        return
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        return
+    name = path.name
+    if not (name.startswith("MP_verify_") and name.endswith(".txt")):
+        return
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    @app.route(f"/{name}", methods=["GET"])
+    def wechat_mp_domain_verify() -> Response:
+        return Response(body, mimetype="text/plain; charset=utf-8")
+
+
 def register(app: Flask) -> None:
-    """挂载 /attitude 与 /ws/attitude，并创建本模块内的 Sock 实例。"""
+    """挂载 /attitude、同源 three.min.js、/ws/attitude；可选微信业务域名校验文件。"""
     sock = Sock(app)
+    _register_wechat_mp_verify(app)
+
+    @app.route("/attitude/vendor/three.min.js")
+    def attitude_three_vendor():
+        return send_from_directory(
+            _VENDOR_DIR,
+            "three.min.js",
+            mimetype="application/javascript; charset=utf-8",
+        )
 
     @app.route("/attitude")
     def attitude_page():
